@@ -1,0 +1,72 @@
+name: Build MortyScan Windows Installer
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v17.0.0)"
+        required: true
+        default: "v17.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build .exe with PyInstaller
+        run: |
+          pyinstaller mortyscan.spec --clean --noconfirm
+
+      - name: Install Inno Setup
+        run: |
+          choco install innosetup --no-progress
+        shell: cmd
+
+      - name: Build installer
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+        shell: pwsh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: MortyScan-Windows
+          path: |
+            dist/MortyScan.exe
+            Output/MortyScan-Setup.exe
+
+      - name: Create Release & Upload assets
+        if: github.event_name == 'push' || github.event.inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ github.event.inputs.tag }}"
+          }
+          gh release create $tag `
+            --title "MortyScan $tag" `
+            --notes "Windows .exe + установщик" `
+            --generate-notes `
+            dist/MortyScan.exe `
+            Output/MortyScan-Setup.exe
+        shell: pwsh

@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# PyInstaller
+build/
+dist/
+*.spec
+!mortyscan.spec
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cases (optional — if you don't want to ship test reports)
+# cases/
+
+# Inno Setup
+Output/
+
+# Images source
+icon_src.png
+
+# Test artifacts / demo reports (contain fake secrets that trigger GitHub push protection)
+cases/
+demo_report.html
+demo_report.pdf
+*.log
