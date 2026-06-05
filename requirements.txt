@@ -4,3 +4,4 @@ requests
 httpx
 typer[all]
 rich
+beautifulsoup4

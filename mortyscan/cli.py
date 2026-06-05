@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +22,23 @@ from rich.prompt import Confirm, Prompt
 from . import __version__, __codename__
 from .ethics import interactive_gate, Authorization
 from .runner import run_scan
+
+def _default_report_dir() -> Path:
+    """Путь к папке отчётов по умолчанию.
+    В Termux → ~/storage/downloads/MortyScan (видно в Android).
+    В обычной системе → ~/MortyScanReports.
+    """
+    home = Path.home()
+    # Termux: если есть storage/downloads, используем его
+    if os.environ.get("TERMUX_VERSION") or (home / "storage" / "downloads").exists():
+        d = home / "storage" / "downloads" / "MortyScan"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    # Обычная система
+    d = home / "MortyScanReports"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
 
 app = typer.Typer(
     add_completion=False,
@@ -68,7 +86,7 @@ def scan_cmd(
                              help="Подтверждаю, что я владелец цели или имею письменное разрешение."),
     yes: bool = typer.Option(False, "--yes", "-y",
                              help="Не задавать интерактивных вопросов (для CI/скриптов)."),
-    out: Path = typer.Option(Path("cases"), "--out", "-o",
+    out: Path = typer.Option(_default_report_dir(), "--out", "-o",
                              help="Каталог для отчётов."),
     modules: Optional[str] = typer.Option(
         None, "--modules",
@@ -175,7 +193,7 @@ def wizard():
     # 4. Выходной каталог
     out_dir = Prompt.ask(
         "\n[bold]Шаг 4.[/bold] Куда сохранить отчёт?",
-        default="cases",
+        default=str(_default_report_dir()),
     )
     case_dir = Path(out_dir) / auth.target
     case_dir.mkdir(parents=True, exist_ok=True)
