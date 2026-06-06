@@ -64,7 +64,7 @@ def interactive_gate(target: str, want_intrusive: bool = True,
                      want_stress: bool = False, want_arp: bool = False,
                      assume_yes: bool = False) -> Authorization:
     auth = Authorization(target=target)
-    console.print(Panel(WARNING, border_style="red", title="MortyScan v17 «Инквизитор»"))
+    console.print(Panel(WARNING, border_style="red", title="MortyScan v18.1 «Инквизитор»"))
 
     if assume_yes:
         auth.owner_or_authorized = True

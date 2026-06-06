@@ -1,4 +1,4 @@
-# MortyScan v17 «Инквизитор»
+# MortyScan v18.1 «Инквизитор»
 
 > Сканер безопасности веб-сайтов на русском языке для **авторизованного** аудита.
 > Объясняет каждую находку простыми словами: что это, чем грозит, как чинить.
@@ -27,21 +27,22 @@ MortyScan умеет **активно тестировать** сайты (фу�
 
 ---
 
-## Что нового в v17 (по сравнению с v16)
+## Что нового в v18.1 (по сравнению с v18.0)
 
-| | v16 «Overlord» | v17 «Инквизитор» |
+| | v18.0 «Инквизитор» | v18.1 «Инквизитор» |
 |---|---|---|
 | Архитектура | один файл, 250 строк | модульный пакет, 13 плагинов |
 | Сеть | sync `requests` + 200 threads | async `httpx` + asyncio |
 | Локализация | смесь ru/en | **полностью русский интерфейс** |
 | Подсказки | нет | для каждой уязвимости — «что это», «аналогия», «чем грозит», «как чинить» |
 | Разведка | DNS A | DNS A/AAAA/MX/NS/TXT/SOA/CNAME/CAA + SPF/DMARC + сабдомены через crt.sh |
+| Сведения о сайте | нет | IP/IPv6, PTR, ASN, страна/город, регистратор, RDAP, финальный URL, title, HTTP-версия, CDN/WAF |
 | Заголовки | server/X-Powered-By | полный аудит security headers + cookies + CORS |
 | TLS | нет | проверка версий, срок сертификата, SAN |
 | Порты | 6 портов | топ-60 портов async + баннеры + **выделение опасных** (Redis, Mongo, etcd, Docker API) |
 | Скрытые пути | 7 путей, тупой 200-чек | 100+ путей с **soft-404 baseline** через сравнение длины и сигнатуры |
 | Краулер | нет | async-краулер в scope-доменe, парсит HTML/JS/формы, ищет утечки секретов |
-| Уязвимости | error-SQLi + примитивный XSS | SQLi (по ошибке + boolean + time-based), XSS, LFI, SSRF, Open Redirect — на параметрах из краула |
+| Уязвимости | error-SQLi + примитивный XSS | SQLi (по ошибке + boolean + time-based), XSS, LFI, SSRF, Open Redirect, SSTI — на параметрах из краула |
 | Технологии | нет | фингерпринт + **CVE через NVD API** |
 | Захват сабдомена | нет | сравнение CNAME с базой fingerprint'ов «осиротевших» сервисов |
 | JWT | нет | разбор alg=none, **брутфорс HS256** по словарю слабых секретов |
@@ -90,7 +91,10 @@ python -m mortyscan scan example.com
 python -m mortyscan scan example.com --active
 
 # Автоматический режим для своих сайтов (без вопросов)
-python -m mortyscan scan example.com --active --yes --i-own-this-target
+python -m mortyscan scan example.com,api.example.com --active --yes --i-own-this-target
+
+# Более агрессивный, но всё ещё проверочный режим
+python -m mortyscan scan example.com --active --aggressive --yes --i-own-this-target
 
 # Стресс-тест (опасно! сайт может упасть)
 python -m mortyscan scan example.com --active --stress --i-own-this-target
@@ -157,14 +161,16 @@ python -m mortyscan scan http://127.0.0.1:5055 \
 | Модуль | Активный | Что делает |
 |---|:-:|---|
 | `recon` | – | DNS-записи, SPF/DMARC, сабдомены через журналы сертификатов |
+| `siteinfo` | – | IP/IPv6, PTR, ASN, страна, регистратор, RDAP, редиректы, HTTP-профиль, CDN/WAF |
 | `headers` | – | HSTS/CSP/XFO/XCTO/Referrer-Policy, флаги cookie, CORS |
+| `methods` | – / ✓ | OPTIONS, TRACE, WebDAV, потенциально опасные HTTP-методы |
 | `tls` | – | Версии TLS, срок сертификата, SAN |
 | `tech` | – | Определение CMS/фреймворков + CVE через NVD |
 | `ports` | – | Async TCP-скан топ-60 + баннеры |
 | `crawler` | – | Краул сайта, формы, параметры, утечки секретов |
 | `graphql` | – | Поиск GraphQL + проверка интроспекции |
 | `discovery` | ✓ | Подбор скрытых путей с soft-404 baseline |
-| `vulns` | ✓ | SQLi (3 типа), XSS, LFI, Open Redirect, SSRF |
+| `vulns` | ✓ | SQLi (3 типа), XSS, SSTI, LFI, Open Redirect, SSRF |
 | `jwt` | – | Разбор JWT, брутфорс HS256 по словарю |
 | `takeover` | – | Проверка сабдоменов на возможность захвата |
 | `local_arp` | – | ARP-скан ВАШЕЙ локальной сети (нужен root) |
@@ -191,8 +197,6 @@ pytest tests/ -v
 
 - Аутентифицированные сканы (логин-флоу, cookies, Bearer)
 - WebSocket-проверки
-- Брутфорс корзин S3 / Azure Blob
-- Out-of-band SSRF/XSS через свой interactsh-collaborator
 - Подкачка словарей из SecLists на лету
 - Wappalyzer fingerprint DB
 - Export в Burp Issues / DefectDojo
