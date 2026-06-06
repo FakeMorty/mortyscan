@@ -1,4 +1,4 @@
-"""Командная строка MortyScan v17 «Инквизитор».
+"""Командная строка MortyScan v18 «Инквизитор».
 
 Примеры:
   python -m mortyscan                            # интерактивный мастер
@@ -50,11 +50,12 @@ app = typer.Typer(
 console = Console()
 
 
-WELCOME = """[bold magenta]MortyScan v17 «Инквизитор»[/bold magenta]
+WELCOME = """[bold magenta]MortyScan v18 «Инквизитор»[/bold magenta]
 Сканер безопасности веб-сайтов на русском языке.
 
 [yellow]Что я умею:[/yellow]
-  • Проверить DNS, сертификат, заголовки, порты
+  • Проверить DNS, сертификат, заголовки, HTTP-методы, порты
+  • Собрать сведения о сайте: IP, ASN, страна, регистратор, редиректы, CDN/WAF
   • Найти забытые файлы (.env, бэкапы, .git)
   • Поймать SQL-инъекции, XSS, LFI, SSRF, открытые редиректы
   • Поискать сабдомены и проверить их на захват
@@ -90,7 +91,7 @@ def scan_cmd(
                              help="Каталог для отчётов."),
     modules: Optional[str] = typer.Option(
         None, "--modules",
-        help="Список модулей через запятую (recon,headers,tls,tech,ports,crawler,"
+        help="Список модулей через запятую (recon,siteinfo,headers,methods,tls,tech,ports,crawler,"
              "graphql,discovery,vulns,jwt,takeover,local_arp,stress).",
     ),
     timeout: float = typer.Option(10.0, "--timeout", help="Таймаут на HTTP-запрос, сек."),
@@ -100,6 +101,9 @@ def scan_cmd(
                                         help="HTTP-прокси, напр. http://127.0.0.1:8080 (Burp)."),
     crawl_max: int = typer.Option(80, "--crawl-max", help="Лимит страниц для краулера."),
     crawl_depth: int = typer.Option(3, "--crawl-depth", help="Глубина краула."),
+    aggressive: bool = typer.Option(False, "--aggressive",
+                                    help="Более агрессивный, но всё ещё проверочный режим: шире wordlist, "
+                                         "дополнительные payload'ы, аудит HTTP-методов/TRACE."),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
     """Запустить сканирование."""
@@ -145,7 +149,7 @@ def scan_cmd(
     )
 
     mods = set(m.strip() for m in modules.split(",")) if modules else None
-    config = {"crawl_max": crawl_max, "crawl_depth": crawl_depth}
+    config = {"crawl_max": crawl_max, "crawl_depth": crawl_depth, "aggressive": aggressive}
 
     asyncio.run(run_scan(
         target=target, auth=auth, case_dir=case_dir,

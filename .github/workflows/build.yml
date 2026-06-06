@@ -1,4 +1,4 @@
-name: Build MortyScan Windows Installer
+name: Build MortyScan Windows Release
 
 on:
   push:
@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v17.0.0)"
+        description: "Release tag (e.g. v18.0.0)"
         required: true
-        default: "v17.0.0"
+        default: "v18.0.0"
 
 permissions:
   contents: write
@@ -26,13 +26,28 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Resolve tag and version
+        id: meta
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ github.event.inputs.tag }}"
+          }
+          if (-not $tag) {
+            throw "Release tag is empty"
+          }
+          $version = $tag.TrimStart('v')
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Build .exe with PyInstaller
+      - name: Build portable .exe with PyInstaller
         run: |
           pyinstaller mortyscan.spec --clean --noconfirm
 
@@ -41,32 +56,40 @@ jobs:
           choco install innosetup --no-progress
         shell: cmd
 
-      - name: Build installer
-        run: |
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+      - name: Build online Setup.exe
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          APP_VERSION: ${{ steps.meta.outputs.version }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
         shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            "/DMyAppVersion=$env:APP_VERSION" `
+            "/DMyReleaseTag=$env:RELEASE_TAG" `
+            "/DMyRepoOwner=$env:REPO_OWNER" `
+            "/DMyRepoName=$env:REPO_NAME" `
+            "/DMyPortableAssetName=MortyScan.exe" `
+            installer_online.iss
 
-      - name: Upload artifacts
+      - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: MortyScan-Windows
+          name: MortyScan-Windows-${{ steps.meta.outputs.tag }}
           path: |
             dist/MortyScan.exe
-            Output/MortyScan-Setup.exe
+            Output/Setup.exe
 
-      - name: Create Release & Upload assets
-        if: github.event_name == 'push' || github.event.inputs.tag != ''
+      - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $tag = "${{ github.ref_name }}"
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $tag = "${{ github.event.inputs.tag }}"
-          }
-          gh release create $tag `
-            --title "MortyScan $tag" `
-            --notes "Windows .exe + установщик" `
-            --generate-notes `
-            dist/MortyScan.exe `
-            Output/MortyScan-Setup.exe
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          APP_VERSION: ${{ steps.meta.outputs.version }}
         shell: pwsh
+        run: |
+          gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:RELEASE_TAG --title "MortyScan v$env:APP_VERSION" --generate-notes
+          }
+          gh release upload $env:RELEASE_TAG dist/MortyScan.exe --clobber
+          gh release upload $env:RELEASE_TAG Output/Setup.exe --clobber

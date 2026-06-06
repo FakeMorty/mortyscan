@@ -1,7 +1,8 @@
-"""Определение технологий + поиск известных уязвимостей (CVE) через NVD."""
+"""Определение технологий + аккуратный поиск известных CVE через NVD."""
 from __future__ import annotations
 
 import re
+from typing import Any
 
 import httpx
 
@@ -33,82 +34,209 @@ RULES = [
     ("Tomcat",    re.compile(r"tomcat", re.I), None),
 ]
 
+_EOL_RULES: dict[str, tuple[tuple[int, int], Severity]] = {
+    "PHP": ((8, 1), Severity.HIGH),
+    "WordPress": ((5, 9), Severity.MEDIUM),
+}
+
+
+def _extract_version(text: str) -> str:
+    m = re.search(r"([\d]+\.[\d]+(?:\.[\d]+)?)", text or "")
+    return m.group(1) if m else ""
+
+
+def _version_tuple(ver: str) -> tuple[int, ...]:
+    out = []
+    for part in re.findall(r"\d+", ver or "")[:3]:
+        out.append(int(part))
+    return tuple(out)
+
+
+def _is_eol(label: str, ver: str) -> bool:
+    rule = _EOL_RULES.get(label)
+    if not rule or not ver:
+        return False
+    cutoff, _ = rule
+    current = _version_tuple(ver)
+    if not current:
+        return False
+    while len(current) < len(cutoff):
+        current = current + (0,)
+    return current[: len(cutoff)] <= cutoff
+
+
+def _severity_from_score(score: float | None) -> Severity:
+    if not score:
+        return Severity.LOW
+    if score >= 9:
+        return Severity.CRITICAL
+    if score >= 7:
+        return Severity.HIGH
+    if score >= 4:
+        return Severity.MEDIUM
+    return Severity.LOW
+
+
+def _confidence(evidence_count: int, has_version: bool) -> str:
+    score = evidence_count + (1 if has_version else 0)
+    if score >= 3:
+        return "high"
+    if score >= 2:
+        return "medium"
+    return "low"
+
+
+async def _fetch_cves(client: httpx.AsyncClient, label: str, ver: str) -> list[dict[str, Any]]:
+    api = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+    q = f"{label} {ver}"
+    try:
+        r = await client.get(api, params={"keywordSearch": q, "resultsPerPage": 10}, timeout=12)
+    except Exception:
+        return []
+    if r.status_code != 200:
+        return []
+    try:
+        data = r.json()
+    except Exception:
+        return []
+
+    out: list[dict[str, Any]] = []
+    for item in data.get("vulnerabilities", [])[:10]:
+        cve = item.get("cve", {})
+        cid = cve.get("id", "")
+        if not cid:
+            continue
+        desc = next((d.get("value", "") for d in cve.get("descriptions", []) if d.get("lang") == "en"), "")
+        metrics = cve.get("metrics", {}) or {}
+        score = None
+        for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+            if key in metrics and metrics[key]:
+                score = metrics[key][0].get("cvssData", {}).get("baseScore")
+                break
+        out.append({
+            "id": cid,
+            "score": score,
+            "description": desc[:300],
+            "url": f"https://nvd.nist.gov/vuln/detail/{cid}",
+        })
+    return out
+
 
 async def run(ctx: ScanContext, client: httpx.AsyncClient) -> None:
     try:
         r = await client.get(ctx.base_url)
     except Exception:
         return
+
     body = r.text or ""
     server = r.headers.get("server", "")
     powered = r.headers.get("x-powered-by", "")
     cookies = "; ".join(f"{c.name}={c.value}" for c in r.cookies)
 
-    detected: dict[str, str] = {}
+    detected: dict[str, dict[str, Any]] = {}
 
     for label, hre, bre in RULES:
         ver = ""
-        hit = False
-        if hre and (hre.search(server) or hre.search(powered) or hre.search(cookies)):
-            hit = True
-            # Берём версию ТОЛЬКО из источника, где сматчилось имя технологии,
-            # чтобы не приписать PHP версию из «Server: Werkzeug/3.1.8».
-            for hay in (server, powered, cookies):
-                if hre.search(hay):
-                    m = re.search(r"([\d]+\.[\d]+(?:\.[\d]+)?)", hay)
-                    if m: ver = m.group(1); break
+        evidence: list[str] = []
+
+        if hre:
+            for source_name, hay in (
+                ("header:server", server),
+                ("header:x-powered-by", powered),
+                ("cookie", cookies),
+            ):
+                if hay and hre.search(hay):
+                    evidence.append(f"{source_name}={hay[:120]}")
+                    if not ver:
+                        ver = _extract_version(hay)
+
         if bre:
             m = bre.search(body)
             if m:
-                hit = True
-                if m.groups():
+                evidence.append(f"body:{m.group(0)[:120]}")
+                if not ver and m.groups():
                     for g in m.groups():
-                        if g and re.match(r"^\d", g):
-                            ver = g; break
-        if hit:
-            detected[label] = ver
+                        if g and re.match(r"^\d", str(g)):
+                            ver = str(g)
+                            break
 
-    for label, ver in detected.items():
-        title = f"Технология обнаружена: {label}" + (f" {ver}" if ver else "")
+        if not evidence:
+            continue
+
+        detected[label] = {
+            "version": ver,
+            "evidence": evidence,
+            "confidence": _confidence(len(evidence), bool(ver)),
+        }
+
+    for label, meta in detected.items():
+        ver = meta.get("version", "")
+        conf = meta.get("confidence", "low")
+        sources = meta.get("evidence", [])
         ctx.tech[label] = ver
+        title = f"Технология обнаружена: {label}" + (f" {ver}" if ver else "")
         ctx.add(Finding(
-            module=NAME, title=title, severity=Severity.INFO,
-            description=f"Распознано по заголовкам/телу ответа/cookie. "
-                        f"server={server or '—'}, X-Powered-By={powered or '—'}",
+            module=NAME,
+            title=title,
+            severity=Severity.INFO,
+            description=(
+                "Распознано по заголовкам/телу ответа/cookie. Источники: "
+                + "; ".join(sources[:4])
+                + (f"; ещё {len(sources) - 4}" if len(sources) > 4 else "")
+            ),
+            confidence=conf,
+            source=", ".join(s.split("=", 1)[0] for s in sources[:4]),
+            raw={"evidence": sources},
         ))
 
-        if ver:
-            try:
-                q = f"{label} {ver}"
-                api = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-                cve_r = await client.get(api, params={"keywordSearch": q, "resultsPerPage": 5}, timeout=10)
-                if cve_r.status_code == 200:
-                    data = cve_r.json()
-                    for item in data.get("vulnerabilities", [])[:5]:
-                        cve = item["cve"]
-                        cid = cve["id"]
-                        desc = next((d["value"] for d in cve.get("descriptions", []) if d["lang"] == "en"), "")
-                        metrics = cve.get("metrics", {})
-                        score = None
-                        for k in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
-                            if k in metrics and metrics[k]:
-                                score = metrics[k][0]["cvssData"].get("baseScore")
-                                break
-                        sev = Severity.LOW
-                        if score:
-                            if score >= 9: sev = Severity.CRITICAL
-                            elif score >= 7: sev = Severity.HIGH
-                            elif score >= 4: sev = Severity.MEDIUM
-                        ctx.add(Finding(
-                            module=NAME,
-                            title=f"Возможная CVE для {label} {ver}: {cid}",
-                            severity=sev, cvss=score,
-                            description=(f"В базе NVD найдена уязвимость для версии «{label} {ver}». "
-                                         f"Описание (англ.): {desc[:400]}"),
-                            references=[f"https://nvd.nist.gov/vuln/detail/{cid}"],
-                            remediation=f"Проверьте, действительно ли используется уязвимая версия. "
-                                        f"Обновите {label} до последней стабильной версии. "
-                                        "Если обновление невозможно — изучите раздел Mitigations в карточке CVE.",
-                        ))
-            except Exception:
-                pass
+        if _is_eol(label, ver):
+            sev = _EOL_RULES.get(label, ((0, 0), Severity.HIGH))[1]
+            ctx.add(Finding(
+                module=NAME,
+                title=f"Устаревшая технология (EOL): {label} {ver}",
+                severity=sev,
+                description=(
+                    f"Версия {label} {ver} выглядит устаревшей и, вероятно, уже вышла из поддержки. "
+                    "Для таких версий перестают выходить обычные security-обновления, поэтому общий риск резко растёт."
+                ),
+                remediation=(
+                    f"Запланируйте обновление {label} до поддерживаемой стабильной ветки. "
+                    "Даже если прямой эксплуатации сейчас не видно, EOL-стек быстро накапливает критические дыры."
+                ),
+                confidence="medium",
+                source="version heuristic",
+            ))
+
+        if not ver:
+            continue
+
+        cves = await _fetch_cves(client, label, ver)
+        if not cves:
+            continue
+
+        cves_sorted = sorted(cves, key=lambda x: (x.get("score") or 0, x.get("id") or ""), reverse=True)
+        max_score = max((c.get("score") or 0) for c in cves_sorted)
+        sev = _severity_from_score(max_score)
+        top = cves_sorted[:3]
+        refs = [c["url"] for c in top if c.get("url")]
+        top_ids = ", ".join(c["id"] for c in top if c.get("id"))
+        ctx.add(Finding(
+            module=NAME,
+            title=f"Для {label} {ver} найдены релевантные CVE: {len(cves_sorted)} шт.",
+            severity=sev,
+            cvss=max_score or None,
+            description=(
+                f"По эвристическому поиску в NVD для «{label} {ver}» нашлось {len(cves_sorted)} релевантных записей. "
+                f"Самые заметные: {top_ids}. Это НЕ доказательство эксплуатабельности на данном сайте, "
+                "а сигнал проверить версию, changelog и применимость патчей."
+            ),
+            references=refs,
+            remediation=(
+                f"Проверьте реальную версию {label} на сервере и сверите её с advisories производителя. "
+                f"Если версия действительно {ver}, обновите {label} до поддерживаемой ветки."
+            ),
+            confidence="medium",
+            source="NVD keywordSearch",
+            raw={"cves": cves_sorted},
+            category="cve_match",
+        ))

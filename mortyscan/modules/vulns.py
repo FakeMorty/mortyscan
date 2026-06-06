@@ -44,9 +44,18 @@ XSS_PROBES = [
     f"javascript:__M{rand_str(4)}__()",
 ]
 
+SSTI_PAYLOADS = [
+    ("{{7*7}}", "49"),
+    ("${7*7}", "49"),
+    ("<%= 7*7 %>", "49"),
+    ("#{7*7}", "49"),
+]
+
 LFI_PROBES = [
     ("../../../../etc/passwd", "root:x:0:"),
     ("....//....//....//etc/passwd", "root:x:0:"),
+    ("..%2f..%2f..%2f..%2fetc/passwd", "root:x:0:"),
+    ("..%252f..%252f..%252f..%252fetc/passwd", "root:x:0:"),
     ("/etc/passwd%00", "root:x:0:"),
     ("..\\..\\..\\windows\\win.ini", "[fonts]"),
     ("php://filter/convert.base64-encode/resource=index.php", "PD9waHA"),
@@ -210,6 +219,43 @@ async def _probe_xss(client, ctx: ScanContext, t: dict):
             return
 
 
+async def _probe_ssti(client, ctx: ScanContext, t: dict):
+    if not ctx.config.get("aggressive"):
+        return
+    url, param, method = t["url"], t["param"], t["method"]
+    params = dict(t["base_params"])
+
+    base = await _send(client, method, url, params=params, data=params if t["post"] else None)
+    base_text = (base.text or "") if base else ""
+
+    for payload, expected in SSTI_PAYLOADS:
+        params[param] = payload
+        r = await _send(client, method, url, params=params, data=params if t["post"] else None)
+        if not r:
+            continue
+        body = r.text or ""
+        if payload in body:
+            continue
+        if expected in body and expected not in base_text:
+            ctx.add(Finding(
+                module=NAME,
+                title=f"Возможная SSTI в параметре «{param}»",
+                severity=Severity.HIGH, cwe="CWE-1336", cvss=8.0,
+                url=url, evidence=f"payload={payload!r}; expected={expected!r}",
+                description=(
+                    f"Похоже, параметр «{param}» интерпретируется шаблонизатором на стороне сервера. "
+                    "Арифметическое выражение выполнилось и его результат появился в ответе. "
+                    "Это ранний индикатор Server-Side Template Injection."
+                ),
+                remediation=(
+                    "Никогда не подставляйте пользовательский ввод как часть шаблона. "
+                    "Передавайте данные только как значения переменных в безопасный шаблонизатор, "
+                    "включите sandbox/autoescape и запретите динамический render из пользовательской строки."
+                ),
+            ))
+            return
+
+
 async def _probe_lfi(client, ctx: ScanContext, t: dict):
     url, param, method = t["url"], t["param"], t["method"]
     params = dict(t["base_params"])
@@ -328,12 +374,14 @@ async def run(ctx: ScanContext, client: httpx.AsyncClient) -> None:
                     title=f"Тестируется точек ввода: {len(targets)}",
                     severity=Severity.INFO))
 
-    sem = asyncio.Semaphore(int(ctx.config.get("vuln_concurrency", 8)))
+    default_concurrency = 12 if ctx.config.get("aggressive") else 8
+    sem = asyncio.Semaphore(int(ctx.config.get("vuln_concurrency", default_concurrency)))
 
     async def one(t):
         async with sem:
             await _probe_sqli(client, ctx, t)
             await _probe_xss(client, ctx, t)
+            await _probe_ssti(client, ctx, t)
             await _probe_lfi(client, ctx, t)
             await _probe_open_redirect(client, ctx, t)
             await _probe_ssrf(client, ctx, t)

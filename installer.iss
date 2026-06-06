@@ -1,9 +1,9 @@
-; Inno Setup script для MortyScan v17
+; Inno Setup script для MortyScan v18
 ; Собирает MortyScan-Setup.exe, который ставит программу в Program Files,
 ; добавляет ярлык в меню Пуск и (опционально) в PATH.
 
 #define MyAppName "MortyScan"
-#define MyAppVersion "17.0.0"
+#define MyAppVersion "18.0.0"
 #define MyAppPublisher "MortyScan Team"
 #define MyAppExeName "MortyScan.exe"
 

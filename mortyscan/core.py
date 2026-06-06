@@ -1,7 +1,6 @@
 """Core data structures, severity, findings registry, async HTTP client."""
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import enum
 import hashlib
@@ -61,6 +60,9 @@ class Finding:
     remediation: Optional[str] = None
     references: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
+    category: Optional[str] = None
+    confidence: Optional[str] = None
+    source: Optional[str] = None
     ts: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict[str, Any]:
@@ -86,6 +88,7 @@ class ScanContext:
     baseline_404: dict[str, Any] = field(default_factory=dict)
     permissions: dict[str, bool] = field(default_factory=dict)
     config: dict[str, Any] = field(default_factory=dict)
+    site_info: dict[str, Any] = field(default_factory=dict)
 
     def add(self, f: Finding) -> Finding:
         f.target = self.target
@@ -97,11 +100,16 @@ class ScanContext:
 
     def verdict(self) -> str:
         s = self.risk_score()
-        if s >= 400: return "APOCALYPTIC"
-        if s >= 200: return "CRITICAL"
-        if s >= 100: return "HIGH"
-        if s >= 40: return "MEDIUM"
-        if s > 0:   return "LOW"
+        if s >= 400:
+            return "APOCALYPTIC"
+        if s >= 200:
+            return "CRITICAL"
+        if s >= 100:
+            return "HIGH"
+        if s >= 40:
+            return "MEDIUM"
+        if s > 0:
+            return "LOW"
         return "CLEAN"
 
     def verdict_ru(self) -> str:
@@ -118,7 +126,6 @@ def make_client(
     ua: str = DEFAULT_UA,
 ) -> httpx.AsyncClient:
     limits = httpx.Limits(max_connections=50, max_keepalive_connections=20)
-    # http2=True требует пакета h2; включаем только если он установлен
     if http2:
         try:
             import h2  # noqa: F401
@@ -130,7 +137,11 @@ def make_client(
         follow_redirects=follow_redirects,
         http2=http2,
         limits=limits,
-        headers={"User-Agent": ua, "Accept": "*/*", "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.5"},
+        headers={
+            "User-Agent": ua,
+            "Accept": "*/*",
+            "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.5",
+        },
         proxy=proxy,
     )
 
