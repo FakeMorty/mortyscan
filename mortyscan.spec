@@ -6,6 +6,7 @@
     pyinstaller mortyscan.spec --clean --noconfirm
 """
 from PyInstaller.building.build_main import Analysis, PYZ, EXE
+from PyInstaller.utils.hooks import collect_data_files
 from pathlib import Path
 
 # Корень проекта = текущая директория при запуске pyinstaller
@@ -19,6 +20,7 @@ a = Analysis(
     binaries=[],
     datas=[
         (str(PKG / "data" / "wordlist.txt"), "mortyscan/data"),
+        *collect_data_files("tldextract"),
     ],
     hiddenimports=[
         "typer",
@@ -59,6 +61,9 @@ a = Analysis(
         "requests",
         "dns",
         "dns.resolver",
+        "tldextract",
+        "tldextract.cache",
+        "tldextract.suffix_list",
     ],
     hookspath=[],
     hooksconfig={},

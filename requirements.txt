@@ -5,3 +5,7 @@ httpx
 typer[all]
 rich
 beautifulsoup4
+dnspython
+lxml
+tldextract
+Flask

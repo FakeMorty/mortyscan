@@ -14,6 +14,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from mortyscan.cli import _case_name, _split_targets
 from mortyscan.ethics import Authorization
 from mortyscan.runner import run_scan
 
@@ -93,6 +94,13 @@ def test_verdict_localization(lab, tmp_path):
         "ЧИСТО", "НИЗКИЙ РИСК", "СРЕДНИЙ РИСК",
         "ВЫСОКИЙ РИСК", "КРИТИЧЕСКИЙ РИСК", "КАТАСТРОФА",
     }
+
+
+def test_cli_multi_target_helpers():
+    targets = _split_targets("example.com, api.example.com ; example.com\nhttps://test.local:8443")
+    assert targets == ["example.com", "api.example.com", "https://test.local:8443"]
+    assert _case_name("https://test.local:8443/path") == "test.local:8443"
+    assert _case_name("example.com") == "example.com"
 
 
 def test_report_files_created(lab, tmp_path):

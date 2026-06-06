@@ -16,6 +16,10 @@ try:
 except ImportError:
     _ext = None
 
+COMMON_SECOND_LEVEL = {
+    "co", "com", "net", "org", "gov", "edu", "ac",
+}
+
 from ..core import Finding, ScanContext, Severity
 
 NAME = "crawler"
@@ -38,11 +42,17 @@ SECRET_PATTERNS = [
 
 
 def _registrable(host: str) -> str:
+    parts = [p for p in (host or "").split(".") if p]
+    fallback = ".".join(parts[-2:]) if len(parts) >= 2 else host
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in COMMON_SECOND_LEVEL:
+        fallback = ".".join(parts[-3:])
     if _ext:
-        e = _ext(host)
-        return ".".join(p for p in [e.domain, e.suffix] if p) or host
-    parts = host.split(".")
-    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+        try:
+            e = _ext(host)
+            return ".".join(p for p in [e.domain, e.suffix] if p) or fallback
+        except Exception:
+            return fallback
+    return fallback
 
 
 def _in_scope(url: str, scope_domain: str) -> bool:
