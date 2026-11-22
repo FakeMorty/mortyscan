@@ -18,7 +18,9 @@ a = Analysis(
     pathex=[str(ROOT), str(ROOT / "mortyscan")],
     binaries=[],
     datas=[
-        (str(PKG / "data" / "wordlist.txt"), "mortyscan/data"),
+        (str(path), "mortyscan/data")
+        for path in (PKG / "data").glob("*")
+        if path.is_file()
     ],
     hiddenimports=[
         "typer",
@@ -59,6 +61,7 @@ a = Analysis(
         "requests",
         "dns",
         "dns.resolver",
+        "yaml",
     ],
     hookspath=[],
     hooksconfig={},
