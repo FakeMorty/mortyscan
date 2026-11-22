@@ -1,0 +1,3 @@
+# `subdomain_deep` — subdomain inventory
+
+Passive certificate-transparency data may be used in a normal scan. External Subfinder is optional and runs through the managed async wrapper; deeper DNS wordlist enumeration requires `--active --deep-subdomains`, and mutations require the additional `--mutate` flag. Candidate counts are bounded by `--subdomain-max` (maximum 5000), wildcard results are filtered, and `--scope-file` filters discovered names. Missing binaries/providers gracefully skip. Enumeration is not exploitation, but creates external DNS/provider traffic; `--no-external` disables binary/API lookups.

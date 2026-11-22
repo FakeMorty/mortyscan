@@ -1,0 +1,87 @@
+- id: env-cors-credentials
+  name: ".env plus credentialed CORS"
+  when:
+    - module: exposures
+      title_contains_any: [".env", "секретов"]
+    - module: cors_audit
+      title_contains_any: ["credentials", "credentials"]
+  severity: critical
+  narrative: "Публичная конфигурация с потенциальными секретами сочетается с credentialed CORS. Проверьте ротацию секретов и доступность приватных ответов из браузера."
+- id: weak-jwt-admin
+  name: "Weak JWT plus admin surface"
+  when:
+    - module: jwt
+      title_contains_any: ["слабым секретом", "alg=none"]
+    - title_contains_any: ["admin", "админ"]
+      url_path_contains_any: ["/admin", "/administrator"]
+  severity: critical
+  narrative: "Слабая JWT-проверка и административная поверхность обнаружены вместе; подтвердите влияние на доступ отдельно."
+- id: s3-env
+  name: "Public cloud storage plus environment file"
+  when:
+    - module: exposures
+      title_contains_any: ["s3", "bucket", "облачное хранилище"]
+    - module: exposures
+      title_contains_any: [".env"]
+  severity: critical
+  narrative: "Публичное объектное хранилище и файл окружения могут раскрыть cloud credentials."
+- id: source-map-secret
+  name: "Source map plus hardcoded secret"
+  when:
+    - tag_any: ["source-map"]
+      title_contains_any: ["исходный код"]
+    - tag_any: ["secret", "source-map"]
+      title_contains_any: ["секрет"]
+  severity: critical
+  narrative: "Опубликованная карта исходников содержит строку, похожую на секрет; проверьте и отзовите credential, если он действующий."
+- id: bola-idor
+  name: "BOLA/IDOR horizontal access"
+  allow_same_finding: true
+  when:
+    - title_contains_any: ["bola"]
+    - title_contains_any: ["idor"]
+  severity: critical
+  narrative: "API-проверка обнаружила потенциальный доступ к объектам между аккаунтами. Проверьте ownership enforcement для каждого объекта."
+- id: sqli-admin-panel
+  name: "SQL injection plus exposed admin panel"
+  when:
+    - title_contains_any: ["sql-инъекция", "sql injection"]
+    - raw_path_contains_any: ["admin", "administrator"]
+      url_path_contains_any: ["admin", "administrator"]
+  severity: critical
+  narrative: "SQL-инъекция сочетается с найденной административной панелью. Ограничьте доступ и исправьте запросы параметризацией."
+- id: ssrf-cloud-metadata
+  name: "SSRF plus cloud metadata exposure"
+  when:
+    - title_contains_any: ["ssrf"]
+    - title_contains_any: ["metadata", "метаданные", "169.254.169.254"]
+      evidence_contains_any: ["169.254.169.254", "metadata"]
+  severity: critical
+  narrative: "SSRF-сигнал сочетается с обнаружением cloud metadata; проверьте блокировку metadata endpoints и права workload identity."
+- id: takeover-cookie-scope
+  name: "Subdomain takeover plus weak cookie controls"
+  when:
+    - module: takeover
+      title_contains_any: ["захват сабдомена"]
+    - module: headers
+      title_contains_any: ["cookie"]
+      evidence_contains_any: ["domain=", "domain"]
+  severity: critical
+  narrative: "Возможный takeover сабдомена сочетается с ослабленными cookie controls. Проверьте Domain scope сессионных cookie и удалите dangling DNS-записи."
+- id: default-creds-admin
+  name: "Default credentials plus admin panel"
+  when:
+    - title_contains_any: ["default credentials", "default password", "учётные данные по умолчанию"]
+    - raw_path_contains_any: ["admin", "administrator"]
+      url_path_contains_any: ["admin", "administrator"]
+  severity: critical
+  narrative: "Признак учётных данных по умолчанию сочетается с административной поверхностью. Немедленно смените пароль и ограничьте панель."
+- id: oauth-open-redirect
+  name: "OAuth redirect token theft path"
+  allow_same_finding: true
+  when:
+    - module: redirect
+      title_contains_any: ["open redirect", "открытый редирект"]
+      title_requires_any: ["oauth", "oauth-контекст"]
+  severity: critical
+  narrative: "Open redirect обнаружен в OAuth-контексте; проверьте точную allowlist redirect_uri и возможность утечки authorization code/token."

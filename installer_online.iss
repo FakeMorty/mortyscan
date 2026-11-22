@@ -1,10 +1,10 @@
-; Inno Setup online/bootstrap installer для MortyScan v18
+; Inno Setup online/bootstrap installer для MortyScan v20
 ; Этот Setup.exe НЕ содержит внутри MortyScan.exe,
 ; а скачивает portable-бинарник из GitHub Releases и затем устанавливает его.
 
 #define MyAppName "MortyScan"
 #ifndef MyAppVersion
-  #define MyAppVersion "18.0.0"
+  #define MyAppVersion "20.0.0"
 #endif
 #ifndef MyAppPublisher
   #define MyAppPublisher "MortyScan Team"
@@ -16,7 +16,7 @@
   #define MyPortableAssetName "MortyScan.exe"
 #endif
 #ifndef MyReleaseTag
-  #define MyReleaseTag "v18.0.0"
+  #define MyReleaseTag "v20.0.0"
 #endif
 #ifndef MyRepoOwner
   #define MyRepoOwner "FakeMorty"

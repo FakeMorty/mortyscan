@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import time
 from typing import Iterable
 
 import httpx
@@ -35,6 +36,8 @@ def _parse_jwt(tok: str) -> tuple[dict, dict, bytes] | None:
         h, p, sig = tok.split(".")
         header = json.loads(_b64url_decode(h))
         payload = json.loads(_b64url_decode(p))
+        if not isinstance(header, dict) or not isinstance(payload, dict):
+            return None
         signature = _b64url_decode(sig) if sig else b""
         return header, payload, signature
     except Exception:
@@ -59,6 +62,9 @@ def _collect_tokens(ctx: ScanContext) -> Iterable[tuple[str, str]]:
         for m in JWT_RE.findall(v):
             if m not in seen:
                 seen.add(m); yield ("headers", m)
+    for token in ctx.seen_jwts:
+        if token not in seen:
+            seen.add(token); yield ("javascript", token)
     # Если кто-то положил в config
     for tok in ctx.config.get("seen_jwts", []) or []:
         if tok not in seen:
@@ -83,7 +89,7 @@ async def run(ctx: ScanContext, client: httpx.AsyncClient) -> None:
                 module=NAME,
                 title="JWT: разрешён небезопасный alg=none",
                 severity=Severity.CRITICAL, cwe="CWE-347", cvss=9.8,
-                evidence=f"источник: {source}; header={header}",
+                evidence=f"источник: {source}; alg=none",
                 description="Найден JWT с alg=none. Если валидатор такие токены принимает — "
                             "любой может подделать токен от чьего угодно имени без всякой подписи.",
                 remediation="На стороне валидатора явно запретите alg=none. "
@@ -98,9 +104,9 @@ async def run(ctx: ScanContext, client: httpx.AsyncClient) -> None:
             if secret:
                 ctx.add(Finding(
                     module=NAME,
-                    title=f"JWT: HS256 подписан слабым секретом «{secret}»",
+                    title="JWT: HS256 подписан известным слабым секретом",
                     severity=Severity.CRITICAL, cwe="CWE-326", cvss=9.8,
-                    evidence=f"токен начинается с {tok[:30]}…",
+                    evidence=f"источник: {source}; слабый секрет совпал со словарём (значение скрыто)",
                     description="Удалось подобрать секрет JWT по короткому словарю. "
                                 "Атакующий может выпустить токен от имени любого пользователя.",
                     remediation="Сгенерируйте новый случайный секрет (≥256 бит). "
@@ -119,21 +125,24 @@ async def run(ctx: ScanContext, client: httpx.AsyncClient) -> None:
 
         # Просрочка
         exp = payload.get("exp")
-        if exp:
-            import time as _t
-            if exp < _t.time() - 86400:
-                ctx.add(Finding(
-                    module=NAME,
-                    title="JWT просрочен более чем на сутки",
-                    severity=Severity.INFO,
-                    description=f"exp={exp}. Проверьте, что сервер действительно отвергает просроченные токены.",
-                ))
+        try:
+            expired = exp is not None and float(exp) < time.time() - 86400
+        except (TypeError, ValueError):
+            expired = False
+        if expired:
+            ctx.add(Finding(
+                module=NAME,
+                title="JWT просрочен более чем на сутки",
+                severity=Severity.INFO,
+                description=f"exp={exp}. Проверьте, что сервер действительно отвергает просроченные токены.",
+            ))
 
         # Информация о токене
         ctx.add(Finding(
             module=NAME,
             title=f"Обнаружен JWT (алгоритм {alg.upper() or '?'})",
             severity=Severity.INFO,
-            description=f"Заголовок: {header}\nПолезная нагрузка: "
-                        f"{json.dumps(payload, ensure_ascii=False)[:400]}",
+            description=f"Источник: {source}. Ключи claims: {', '.join(sorted(map(str, payload.keys()))[:20]) or '(нет)'}. "
+                        f"exp={payload.get('exp', '(нет)')}. Содержимое claims и сам токен не записываются в отчёт.",
+            source=source, confidence="high", tags=["jwt", "token"],
         ))

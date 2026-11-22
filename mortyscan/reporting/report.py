@@ -6,16 +6,59 @@ import json
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
+from .. import __version__
 from ..core import Finding, ScanContext, Severity
 from ..i18n import SEVERITY_EXPLAIN, SEVERITY_RU, explanation_for
+
+
+def _safe_url(value: str) -> str:
+    """Drop query and fragment values from report URLs; they may contain credentials."""
+    try:
+        parts = urlsplit(str(value))
+        if parts.scheme in {"http", "https"} and parts.netloc:
+            netloc = parts.netloc.rsplit("@", 1)[-1]
+            return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+        if not parts.scheme and not parts.netloc:
+            return urlunsplit(("", "", parts.path, "", ""))
+    except Exception:
+        pass
+    return str(value)
+
+
+def _safe_data(value, key: str = ""):
+    if isinstance(value, dict):
+        return {str(k): _safe_data(v, str(k)) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_safe_data(item, key) for item in value]
+    if isinstance(value, str):
+        if key.lower() in {"url", "final_url", "matched_at", "matched-at"} or value.startswith(("http://", "https://")):
+            return _safe_url(value)
+    return value
+
+
+def _finding_dict(finding: Finding) -> dict:
+    return _safe_data(finding.to_dict())
+
+
+def _finding_sort_key(finding: Finding):
+    raw = finding.raw if isinstance(finding.raw, dict) else {}
+    enrichment = raw.get("enrichment", {}) if isinstance(raw.get("enrichment", {}), dict) else {}
+    try:
+        epss = float(enrichment.get("epss", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        epss = 0.0
+    return (not bool(enrichment.get("in_kev")), -epss, -(finding.cvss or 0.0), -int(finding.severity), finding.title)
 
 
 def write_json(ctx: ScanContext, out: Path) -> Path:
     payload = {
         "инструмент": "MortyScan",
-        "версия": "18.0.0",
+        "schema_version": "2.0",
+        "версия": __version__,
         "создан": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "diff": _safe_data(ctx.config.get("scan_diff")) if ctx.config.get("scan_diff") else None,
         "цель": ctx.target,
         "адрес": ctx.base_url,
         "ip": ctx.ip,
@@ -23,10 +66,13 @@ def write_json(ctx: ScanContext, out: Path) -> Path:
         "вердикт": ctx.verdict(),
         "вердикт_текст": ctx.verdict_ru(),
         "технологии": ctx.tech,
-        "сведения_о_сайте": ctx.site_info,
-        "обойдено_страниц": sorted(ctx.crawled_urls),
+        "waf_fingerprint": ctx.waf,
+        "сведения_о_сайте": _safe_data(ctx.site_info),
+        "обойдено_страниц": sorted(_safe_url(url) for url in ctx.crawled_urls),
+        "javascript_urls": sorted(_safe_url(url) for url in ctx.script_urls),
+        "api_endpoints": sorted(_safe_url(url) for url in ctx.endpoints),
         "разрешения": ctx.permissions,
-        "находки": [f.to_dict() for f in ctx.findings],
+        "находки": [_finding_dict(f) for f in sorted(ctx.findings, key=_finding_sort_key)],
     }
     out.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False, default=str),
@@ -79,6 +125,7 @@ _HTML_TPL = """<!doctype html>
   .explain .label.analogy {{ color:#fcd34d; }}
   .explain .label.danger {{ color:#fda4af; }}
   .explain .label.fix {{ color:#86efac; }}
+  .f img.screenshot {{ display:block; max-width:360px; max-height:220px; object-fit:contain; margin-top:10px; border-radius:6px; border:1px solid #2a2f3a; }}
   .f pre {{ background:#0a0d12; padding:10px; border-radius:6px; overflow-x:auto;
            font-size: 12px; white-space: pre-wrap; word-break: break-all;
            font-family: "JetBrains Mono", Consolas, monospace; }}
@@ -122,6 +169,8 @@ _HTML_TPL = """<!doctype html>
 
   {siteinfo}
 
+  {scan_diff}
+
   {tldr}
 
   <div class="toc">
@@ -131,7 +180,7 @@ _HTML_TPL = """<!doctype html>
   {sections}
 </main>
 <footer>
-  Создано MortyScan v18 «Инквизитор» · {date}<br>
+  Создано MortyScan v{__version__} «Deep Attack Platform» · {date}<br>
   Этот отчёт предназначен для авторизованного тестирования. Используйте его для исправления уязвимостей.
 </footer>
 </body></html>
@@ -150,8 +199,8 @@ def _verdict_color(verdict_ru: str) -> str:
 
 
 def _build_tldr(ctx: ScanContext) -> str:
-    crit = [f for f in ctx.findings if f.severity == Severity.CRITICAL]
-    high = [f for f in ctx.findings if f.severity == Severity.HIGH]
+    crit = sorted((f for f in ctx.findings if f.severity == Severity.CRITICAL), key=_finding_sort_key)
+    high = sorted((f for f in ctx.findings if f.severity == Severity.HIGH), key=_finding_sort_key)
     top = crit[:3] + high[: max(0, 3 - len(crit))]
     if not top:
         return (
@@ -230,7 +279,7 @@ def _render_siteinfo(ctx: ScanContext) -> str:
 
     cards = []
     for section in ("network", "domain", "http", "edge"):
-        data = ctx.site_info.get(section) or {}
+        data = _safe_data(ctx.site_info.get(section) or {})
         if not data:
             continue
         rows = []
@@ -260,9 +309,29 @@ def _render_siteinfo(ctx: ScanContext) -> str:
     )
 
 
+def _render_diff(ctx: ScanContext) -> str:
+    diff = ctx.config.get("scan_diff")
+    if not isinstance(diff, dict):
+        return ""
+    categories = ("new", "fixed", "still_open", "regressed")
+    labels = {"new": "Новые", "fixed": "Исправленные", "still_open": "Открытые", "regressed": "Регрессии"}
+    counts = diff.get("counts", {}) if isinstance(diff.get("counts"), dict) else {}
+    rows = []
+    for category in categories:
+        entries = diff.get(category, [])
+        entries = entries if isinstance(entries, list) else []
+        detail = "".join(f"<li><b>{html.escape(str(item.get('title', '')))}</b> — "
+                         f"{html.escape(str(item.get('type', 'unknown')))} · "
+                         f"{html.escape(str(item.get('target', '')))}</li>"
+                         for item in entries if isinstance(item, dict))
+        rows.append(f"<h3>{labels[category]}: {int(counts.get(category, len(entries)) or 0)}</h3>"
+                    + (f"<ul>{detail}</ul>" if detail else "<p>Нет записей.</p>"))
+    return '<section class="summary"><h2>Diff сканирований</h2>' + "".join(rows) + "</section>"
+
+
 def write_html(ctx: ScanContext, out: Path) -> Path:
     by_sev: dict[str, list[Finding]] = defaultdict(list)
-    for f in ctx.findings:
+    for f in sorted(ctx.findings, key=_finding_sort_key):
         by_sev[f.severity.label].append(f)
 
     counts = Counter(f.severity.label for f in ctx.findings)
@@ -294,7 +363,8 @@ def write_html(ctx: ScanContext, out: Path) -> Path:
             desc = html.escape(f.description).replace("\n", "<br>") if f.description else ""
             sub_parts = [f"<b>модуль:</b> {html.escape(f.module)}"]
             if f.url:
-                sub_parts.append(f'<b>URL:</b> <a href="{html.escape(f.url)}">{html.escape(f.url)}</a>')
+                safe_url = _safe_url(f.url)
+                sub_parts.append(f'<b>URL:</b> <a href="{html.escape(safe_url)}">{html.escape(safe_url)}</a>')
             if f.cwe:
                 sub_parts.append(f"<b>CWE:</b> {html.escape(f.cwe)}")
             if f.cvss:
@@ -322,6 +392,11 @@ def write_html(ctx: ScanContext, out: Path) -> Path:
                 f'<details><summary>📋 показать улики (evidence)</summary><pre>{ev}</pre></details>'
                 if ev else ""
             )
+            screenshot_rel = f.raw.get("screenshot") if f.module == "browser" and isinstance(f.raw, dict) else None
+            screenshot_html = ""
+            if isinstance(screenshot_rel, str) and screenshot_rel.startswith("screenshots/") and ".." not in screenshot_rel:
+                safe_path = html.escape(screenshot_rel, quote=True)
+                screenshot_html = f'<a href="{safe_path}"><img class="screenshot" src="{safe_path}" alt="Скриншот"></a>'
 
             explain = explanation_for(f.title)
             explain_html = ""
@@ -353,7 +428,7 @@ def write_html(ctx: ScanContext, out: Path) -> Path:
                 f"<h3>{html.escape(f.title)}</h3>"
                 f'<div class="sub">{sub}</div>'
                 f'<div class="desc">{desc}</div>'
-                f"{explain_html}"
+                f"{screenshot_html}{explain_html}"
                 f"{ev_html}{fix_html}{refs_html}"
                 "</div>"
             )
@@ -362,6 +437,7 @@ def write_html(ctx: ScanContext, out: Path) -> Path:
     pages = len(ctx.crawled_urls) or "—"
 
     html_doc = _HTML_TPL.format(
+        __version__=html.escape(__version__),
         target=html.escape(ctx.target),
         ip=html.escape(ctx.ip or "?"),
         date=datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC"),
@@ -375,6 +451,7 @@ def write_html(ctx: ScanContext, out: Path) -> Path:
         techs=techs,
         tldr=_build_tldr(ctx),
         siteinfo=_render_siteinfo(ctx),
+        scan_diff=_render_diff(ctx),
     )
     out.write_text(html_doc, encoding="utf-8")
     return out
@@ -443,7 +520,7 @@ def write_pdf(ctx: ScanContext, out: Path) -> Path | None:
 
     pdf.set_font("helvetica", "B", 20)
     pdf.set_text_color(120, 0, 60)
-    pdf.cell(0, 12, text=_safe("MortyScan v18 - Otchyot po auditu bezopasnosti"), new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.cell(0, 12, text=_safe(f"MortyScan v{__version__} - Otchyot po auditu bezopasnosti"), new_x="LMARGIN", new_y="NEXT", align="C")
 
     pdf.set_font("helvetica", "B", 14)
     color = (200, 0, 0) if ctx.risk_score() >= 100 else (200, 140, 0) if ctx.risk_score() >= 40 else (0, 120, 0)
@@ -499,6 +576,7 @@ def write_pdf(ctx: ScanContext, out: Path) -> Path | None:
         _multi(pdf, 180, 6, "Sведения o saite:")
         pdf.set_font("helvetica", size=9)
         for section_name, payload in ctx.site_info.items():
+            payload = _safe_data(payload)
             if not payload:
                 continue
             _multi(pdf, 180, 5, f"- {section_name}")
@@ -510,8 +588,22 @@ def write_pdf(ctx: ScanContext, out: Path) -> Path | None:
                 _multi(pdf, 175, 4, f"    {k}: {val}")
         pdf.ln(2)
 
+    scan_diff = ctx.config.get("scan_diff")
+    if isinstance(scan_diff, dict):
+        pdf.set_font("helvetica", "B", 12)
+        _multi(pdf, 180, 6, "Scan diff:")
+        pdf.set_font("helvetica", size=9)
+        counts = scan_diff.get("counts", {}) if isinstance(scan_diff.get("counts"), dict) else {}
+        for status in ("new", "fixed", "still_open", "regressed"):
+            _multi(pdf, 180, 5, f"{status}: {counts.get(status, 0)}")
+            entries = scan_diff.get(status, [])
+            for item in entries[:20] if isinstance(entries, list) else []:
+                if isinstance(item, dict):
+                    _multi(pdf, 175, 4, f"  - {item.get('type', '')}: {item.get('title', '')}")
+        pdf.ln(2)
+
     by_sev: dict[str, list[Finding]] = defaultdict(list)
-    for f in ctx.findings:
+    for f in sorted(ctx.findings, key=_finding_sort_key):
         by_sev[f.severity.label].append(f)
 
     for lab in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"):
@@ -543,7 +635,7 @@ def write_pdf(ctx: ScanContext, out: Path) -> Path | None:
             if f.source:
                 line += f" source={f.source}"
             if f.url:
-                line += f" {f.url}"
+                line += f" {_safe_url(f.url)}"
             _multi(pdf, 180, 4, line)
             if f.description:
                 pdf.set_font("helvetica", size=9)

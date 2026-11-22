@@ -9,3 +9,4 @@ dnspython
 lxml
 tldextract
 Flask
+PyYAML>=6.0

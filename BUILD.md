@@ -1,4 +1,4 @@
-# Сборка MortyScan 18 (.exe + GitHub Releases Setup.exe)
+# Сборка MortyScan 20 (.exe + GitHub Releases Setup.exe)
 
 ## 🔥 Самый простой способ — GitHub Actions (рекомендуется)
 
@@ -9,9 +9,9 @@
 
 ```bash
 git add .
-git commit -m "Prepare MortyScan 18 release"
-git tag v18.0.0
-git push origin v18.0.0
+git commit -m "Prepare MortyScan 20 release"
+git tag v20.0.0
+git push origin v20.0.0
 ```
 
 Через 3–5 минут в разделе **Releases** появятся:
@@ -70,8 +70,8 @@ pyinstaller mortyscan.spec --clean --noconfirm
 
 ```powershell
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
-  "/DMyAppVersion=18.0.0" `
-  "/DMyReleaseTag=v18.0.0" `
+  "/DMyAppVersion=20.0.0" `
+  "/DMyReleaseTag=v20.0.0" `
   "/DMyRepoOwner=FakeMorty" `
   "/DMyRepoName=mortyscan" `
   "/DMyPortableAssetName=MortyScan.exe" `
@@ -114,6 +114,6 @@ pyinstaller mortyscan.spec --clean --noconfirm
 ## 🚀 Публикация вручную через GitHub CLI
 
 ```bash
-gh release create v18.0.0 dist/MortyScan.exe Output/Setup.exe \
-  --title "MortyScan v18.0.0" --notes "Windows portable + bootstrap installer"
+gh release create v20.0.0 dist/MortyScan.exe Output/Setup.exe \
+  --title "MortyScan v20.0.0" --notes "Windows portable + bootstrap installer"
 ```
