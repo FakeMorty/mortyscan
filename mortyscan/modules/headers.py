@@ -35,6 +35,38 @@ LEAKY_HEADERS = ["Server", "X-Powered-By", "X-AspNet-Version",
                  "X-AspNetMvc-Version", "X-Generator", "X-Drupal-Cache"]
 
 
+def _parse_csp(value: str) -> dict[str, list[str]]:
+    """Parse a CSP header into directives (keeping the first duplicate as browsers do)."""
+    directives: dict[str, list[str]] = {}
+    for item in value.split(";"):
+        parts = item.strip().split()
+        if parts:
+            directives.setdefault(parts[0].lower(), [part.lower() for part in parts[1:]])
+    return directives
+
+
+def _csp_issues(value: str) -> list[str]:
+    """Return actionable CSP weaknesses while avoiding inline nonce/hash false positives."""
+    policy = _parse_csp(value)
+    issues: list[str] = []
+    script_sources = policy.get("script-src", policy.get("default-src", []))
+    has_nonce_or_hash = any(
+        source.startswith(("'nonce-", "'sha256-", "'sha384-", "'sha512-"))
+        for source in script_sources
+    )
+    if "'unsafe-eval'" in script_sources:
+        issues.append("script-src разрешает 'unsafe-eval'")
+    if "'unsafe-inline'" in script_sources and not has_nonce_or_hash:
+        issues.append("script-src разрешает 'unsafe-inline' без nonce/hash")
+    if any(source in {"*", "http:", "https:"} for source in script_sources):
+        issues.append("script-src использует слишком широкий источник (* / схема целиком)")
+    if "object-src" not in policy or "'none'" not in policy["object-src"]:
+        issues.append("object-src не ограничен значением 'none'")
+    if "base-uri" not in policy:
+        issues.append("не задан base-uri")
+    return issues
+
+
 async def run(ctx: ScanContext, client: httpx.AsyncClient) -> None:
     try:
         r = await client.get(ctx.base_url)
@@ -57,6 +89,58 @@ async def run(ctx: ScanContext, client: httpx.AsyncClient) -> None:
                             "Браузер не получает важную защитную инструкцию.",
                 remediation=fix,
                 cwe="CWE-693",
+                url=ctx.base_url,
+            ))
+
+    # Проверка не только наличия, но и качества CSP
+    csp = r.headers.get("content-security-policy", "")
+    if csp:
+        issues = _csp_issues(csp)
+        if issues:
+            severity = Severity.MEDIUM if any(
+                "unsafe-eval" in issue or "слишком широкий" in issue
+                or "unsafe-inline" in issue for issue in issues
+            ) else Severity.LOW
+            ctx.add(Finding(
+                module=NAME,
+                title="Ослабленная политика Content-Security-Policy",
+                severity=severity,
+                description="Заголовок CSP есть, но некоторые директивы ослабляют защиту "
+                            "от XSS и внедрения активного содержимого: " + "; ".join(issues) + ".",
+                evidence=csp[:500],
+                remediation="Уберите небезопасные источники, задайте строгий script-src "
+                            "(предпочтительно nonce/hash), добавьте object-src 'none' и base-uri 'self'. "
+                            "Проверьте совместимость политики в режиме Content-Security-Policy-Report-Only перед включением.",
+                cwe="CWE-693",
+                url=ctx.base_url,
+                confidence="medium",
+            ))
+
+    # HSTS может присутствовать, но быть фактически отключённым или слишком коротким.
+    hsts = r.headers.get("strict-transport-security", "")
+    if hsts and r.url.scheme == "https":
+        directives = {}
+        for part in hsts.split(";"):
+            key, sep, value = part.strip().partition("=")
+            directives[key.strip().lower()] = value.strip().strip('"') if sep else None
+        raw_age = directives.get("max-age")
+        try:
+            max_age = int(raw_age) if raw_age is not None else None
+        except (TypeError, ValueError):
+            max_age = None
+        if max_age is None or max_age <= 0 or max_age < 15_552_000:
+            reason = ("max-age отсутствует или некорректен" if max_age is None else
+                      "max-age=0 отключает HSTS" if max_age == 0 else
+                      f"max-age={max_age} секунд — меньше шести месяцев")
+            ctx.add(Finding(
+                module=NAME,
+                title="Слабая настройка HSTS",
+                severity=Severity.MEDIUM if max_age is None or max_age == 0 else Severity.LOW,
+                description=f"Strict-Transport-Security присутствует, но {reason}.",
+                evidence=hsts[:300],
+                remediation="Настройте max-age не менее 15552000 секунд (обычно 63072000). "
+                            "Добавляйте includeSubDomains только если все поддомены готовы к HTTPS.",
+                cwe="CWE-319",
                 url=ctx.base_url,
             ))
 
@@ -83,11 +167,17 @@ async def run(ctx: ScanContext, client: httpx.AsyncClient) -> None:
     for sc in cookies_raw:
         if not sc:
             continue
-        low = sc.lower()
+        parts = [part.strip() for part in sc.split(";")]
+        attrs = {}
+        for attr in parts[1:]:
+            key, sep, value = attr.partition("=")
+            attrs[key.strip().lower()] = value.strip().lower() if sep else None
         issues = []
-        if "httponly" not in low: issues.append("нет HttpOnly")
-        if "secure"   not in low: issues.append("нет Secure")
-        if "samesite" not in low: issues.append("нет SameSite")
+        if "httponly" not in attrs: issues.append("нет HttpOnly")
+        if "secure" not in attrs:
+            issues.append("нет Secure (обязателен для SameSite=None)" if attrs.get("samesite") == "none"
+                          else "нет Secure")
+        if "samesite" not in attrs: issues.append("нет SameSite")
         if issues:
             ctx.add(Finding(
                 module=NAME,

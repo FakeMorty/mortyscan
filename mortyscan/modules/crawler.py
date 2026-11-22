@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 from urllib.parse import urljoin, urlparse, parse_qs
 
@@ -96,6 +97,8 @@ async def run(ctx: ScanContext, client: httpx.AsyncClient) -> None:
     seen: set[str] = set()
     forms: list[dict] = []
     params: dict[str, set[str]] = {}
+    script_urls: set[str] = set()
+    discovered_endpoints: set[str] = set()
     secrets_seen: set[tuple[str, str]] = set()
 
     async def worker():
@@ -142,33 +145,41 @@ async def run(ctx: ScanContext, client: httpx.AsyncClient) -> None:
                                 await queue.put((nxt, depth + 1))
                         for s in soup.find_all("script", src=True):
                             nxt = urljoin(url, s["src"])
-                            if _in_scope(nxt, scope) and nxt not in seen:
-                                await queue.put((nxt, depth + 1))
+                            if _in_scope(nxt, scope):
+                                script_urls.add(nxt)
+                                if nxt not in seen:
+                                    await queue.put((nxt, depth + 1))
                 elif "javascript" in ctype or url.endswith(".js"):
                     for m in JS_ENDPOINT_RE.findall(r.text):
                         nxt = urljoin(base, m).split("#")[0]
+                        discovered_endpoints.add(nxt)
                         if _in_scope(nxt, scope) and nxt not in seen and len(seen) < max_pages:
                             await queue.put((nxt, depth + 1))
 
                 # Поиск утечек секретов
                 if r.text and len(r.text) < 1_000_000:
                     for label, pat in SECRET_PATTERNS:
-                        for m in pat.findall(r.text):
-                            key = (label, str(m)[:40])
-                            if key in secrets_seen: continue
+                        for match in pat.finditer(r.text):
+                            matched = match.group(0)
+                            digest = hashlib.sha256(matched.encode("utf-8", errors="ignore")).hexdigest()
+                            key = (label, digest)
+                            shared_seen = ctx.config.setdefault("_js_secret_fingerprints", set())
+                            if key in secrets_seen or digest in shared_seen:
+                                continue
                             secrets_seen.add(key)
+                            shared_seen.add(digest)
                             ctx.add(Finding(
                                 module=NAME,
                                 title=f"Возможная утечка секрета: {label}",
                                 severity=Severity.CRITICAL, cwe="CWE-798",
                                 url=url,
-                                evidence=str(m)[:80],
+                                evidence=f"подпись {label}; SHA-256={digest}",
                                 description=f"В ответе сервера обнаружена строка, похожая на {label}. "
-                                            "Такие данные не должны оказываться в публичном доступе.",
-                                remediation="1) НЕМЕДЛЕННО отзовите/перевыпустите этот секрет. "
-                                            "2) Найдите, откуда он попал в ответ, и уберите из исходников. "
-                                            "3) Используйте переменные окружения или vault. "
-                                            "4) Настройте pre-commit хуки (gitleaks, trufflehog).",
+                                            "Значение скрыто в отчёте; проверьте источник и при подтверждении отзовите секрет.",
+                                remediation="Отзовите/перевыпустите подтверждённый секрет, удалите его из публичного ответа "
+                                            "и используйте переменные окружения или secret manager.",
+                                confidence="medium", source="secret pattern", tags=["secret", "possible-leak"],
+                                raw={"secret_type": label, "sha256": digest},
                             ))
             except Exception:
                 pass
@@ -179,6 +190,8 @@ async def run(ctx: ScanContext, client: httpx.AsyncClient) -> None:
     await asyncio.gather(*workers, return_exceptions=True)
 
     ctx.crawled_urls.update(seen)
+    ctx.script_urls.update(script_urls)
+    ctx.endpoints.update(discovered_endpoints)
     ctx.discovered_forms.extend(forms)
     for k, v in params.items():
         ctx.discovered_params.setdefault(k, set()).update(v)

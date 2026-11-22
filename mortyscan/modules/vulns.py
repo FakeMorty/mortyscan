@@ -115,6 +115,30 @@ def _gather_targets(ctx: ScanContext) -> list[dict]:
     return out
 
 
+def _record_sqli_candidate(ctx: ScanContext, target: dict, signature: str = "") -> None:
+    """Pass the confirmed parameter metadata to the optional SQLMap module."""
+    hint = ""
+    lowered = signature.lower()
+    for marker, name in (("mysql", "MySQL"), ("pg_", "PostgreSQL"), ("psql", "PostgreSQL"),
+                         ("sqlstate", "PostgreSQL"), ("ora-", "Oracle"),
+                         ("ole db", "Microsoft SQL Server"), ("odbc", "Microsoft SQL Server"),
+                         ("sqlite", "SQLite")):
+        if marker in lowered:
+            hint = name
+            break
+    candidates = ctx.sqli_candidates
+    item = {
+        "url": target["url"],
+        "method": target["method"],
+        "param": target["param"],
+        "base_params": dict(target["base_params"]),
+        "post": bool(target["post"]),
+        "dbms_hint": hint,
+    }
+    if item not in candidates:
+        candidates.append(item)
+
+
 async def _probe_sqli(client, ctx: ScanContext, t: dict):
     url, param, method = t["url"], t["param"], t["method"]
     params = dict(t["base_params"])
@@ -135,6 +159,7 @@ async def _probe_sqli(client, ctx: ScanContext, t: dict):
         body = (r.text or "").lower()
         for sign in SQL_ERROR_SIGNS:
             if sign in body and sign not in base_low:
+                _record_sqli_candidate(ctx, t, sign)
                 ctx.add(Finding(
                     module=NAME,
                     title=f"SQL-инъекция (по ошибке БД) в параметре «{param}»",
@@ -156,6 +181,7 @@ async def _probe_sqli(client, ctx: ScanContext, t: dict):
         if rt and rf:
             lt, lf = len(rt.text or ""), len(rf.text or "")
             if abs(lt - base_len) < max(50, base_len * 0.05) and abs(lt - lf) > max(80, base_len * 0.1):
+                _record_sqli_candidate(ctx, t)
                 ctx.add(Finding(
                     module=NAME,
                     title=f"SQL-инъекция (boolean-based) в параметре «{param}»",
@@ -183,6 +209,7 @@ async def _probe_sqli(client, ctx: ScanContext, t: dict):
                 r = None
             elapsed = time.monotonic() - t0
             if 4.5 <= elapsed < 9:
+                _record_sqli_candidate(ctx, t)
                 ctx.add(Finding(
                     module=NAME,
                     title=f"SQL-инъекция (time-based) в параметре «{param}»",
@@ -204,6 +231,11 @@ async def _probe_xss(client, ctx: ScanContext, t: dict):
         if not r: continue
         body = r.text or ""
         if p in body:
+            candidates = ctx.xss_candidates
+            candidate = {"url": url, "method": method, "param": param,
+                         "base_params": dict(t["base_params"]), "post": bool(t["post"])}
+            if candidate not in candidates:
+                candidates.append(candidate)
             ctx.add(Finding(
                 module=NAME,
                 title=f"Отражённая XSS в параметре «{param}»",

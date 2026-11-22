@@ -1,6 +1,7 @@
 """Core data structures, severity, findings registry, async HTTP client."""
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import enum
 import hashlib
@@ -9,6 +10,7 @@ import logging
 import random
 import string
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -64,6 +66,13 @@ class Finding:
     confidence: Optional[str] = None
     source: Optional[str] = None
     ts: float = field(default_factory=time.time)
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    type: Optional[str] = None
+    tags: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.type is None:
+            self.type = self.module
 
     def to_dict(self) -> dict[str, Any]:
         d = dataclasses.asdict(self)
@@ -89,6 +98,13 @@ class ScanContext:
     permissions: dict[str, bool] = field(default_factory=dict)
     config: dict[str, Any] = field(default_factory=dict)
     site_info: dict[str, Any] = field(default_factory=dict)
+    waf: list[dict[str, str]] = field(default_factory=list)
+    script_urls: set[str] = field(default_factory=set)
+    endpoints: set[str] = field(default_factory=set)
+    seen_jwts: set[str] = field(default_factory=set, repr=False)
+    sqli_candidates: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    xss_candidates: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    auth: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def add(self, f: Finding) -> Finding:
         f.target = self.target
@@ -117,6 +133,48 @@ class ScanContext:
         return VERDICT_RU.get(self.verdict(), self.verdict())
 
 
+def host_in_scope(host: str, allowed_hosts: set[str]) -> bool:
+    """Exact/domain-wildcard/CIDR allowlist match used by the request guard."""
+    import ipaddress
+
+    host = (host or "").lower().rstrip(".")
+    if not host:
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    for raw_entry in allowed_hosts:
+        entry = str(raw_entry).strip().lower().rstrip(".")
+        if not entry or entry.startswith("#"):
+            continue
+        wildcard = entry.startswith("*.")
+        candidate = entry[2:] if wildcard else entry
+        try:
+            network = ipaddress.ip_network(candidate, strict=False)
+            if address is not None and address in network:
+                return True
+            continue
+        except ValueError:
+            pass
+        if host == candidate and not wildcard:
+            return True
+        if host.endswith("." + candidate):
+            return True
+    return False
+
+
+def same_origin(url: str, origin: str) -> bool:
+    """Return whether two absolute HTTP(S) URLs share scheme, host, and port."""
+    try:
+        left, right = httpx.URL(url), httpx.URL(origin)
+        return (left.scheme in {"http", "https"}
+                and (left.scheme, left.host.lower(), left.port)
+                == (right.scheme, right.host.lower(), right.port))
+    except Exception:
+        return False
+
+
 def make_client(
     timeout: float = 10.0,
     verify: bool = True,
@@ -124,6 +182,12 @@ def make_client(
     http2: bool = False,
     proxy: Optional[str] = None,
     ua: str = DEFAULT_UA,
+    extra_headers: Optional[dict[str, str]] = None,
+    auth_host: Optional[str] = None,
+    auth_origin: Optional[str] = None,
+    scope_hosts: Optional[set[str]] = None,
+    rate_limit: float = 10.0,
+    transport: Optional[httpx.AsyncBaseTransport] = None,
 ) -> httpx.AsyncClient:
     limits = httpx.Limits(max_connections=50, max_keepalive_connections=20)
     if http2:
@@ -131,18 +195,61 @@ def make_client(
             import h2  # noqa: F401
         except ImportError:
             http2 = False
+    request_headers = {
+        "User-Agent": ua,
+        "Accept": "*/*",
+        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.5",
+    }
+    safe_extra = {
+        key: value for key, value in (extra_headers or {}).items()
+        if key.lower() not in {"host", "content-length", "connection", "transfer-encoding", "proxy-authorization"}
+    }
+    request_headers.update(safe_extra)
+    auth_names = [key for key in safe_extra]
+    allowed = httpx.URL(auth_origin) if auth_origin else None
+    allowed_host = (allowed.host if allowed else auth_host or "").lower().rstrip(".")
+    allowed_scheme = allowed.scheme if allowed else None
+    allowed_port = allowed.port if allowed else None
+    scope = {str(item).strip().lower() for item in (scope_hosts or set()) if str(item).strip()}
+    interval = 1.0 / max(0.1, float(rate_limit))
+    rate_states: dict[str, tuple[asyncio.Lock, float]] = {}
+
+    async def guard_request(request: httpx.Request) -> None:
+        request_host = (request.url.host or "").lower().rstrip(".")
+        if scope and not host_in_scope(request_host, scope):
+            raise httpx.RequestError(f"Blocked out-of-scope request to {request_host}", request=request)
+        if auth_origin or auth_host:
+            same_host = request_host == allowed_host
+            same_scheme = allowed_scheme is None or request.url.scheme == allowed_scheme
+            same_port = allowed_port is None or request.url.port == allowed_port
+            if not (same_host and same_scheme and same_port):
+                # Login may add Authorization/Cookie after client construction, so
+                # strip sensitive headers dynamically as well as configured headers.
+                for header in set(auth_names) | {"authorization", "cookie", "proxy-authorization"}:
+                    request.headers.pop(header, None)
+        state = rate_states.get(request_host)
+        if state is None:
+            state = (asyncio.Lock(), 0.0)
+            rate_states[request_host] = state
+        lock = state[0]
+        async with lock:
+            previous = rate_states[request_host][1]
+            delay = interval - (time.monotonic() - previous)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            rate_states[request_host] = (lock, time.monotonic())
+
+    hooks = {"request": [guard_request]}
     return httpx.AsyncClient(
         timeout=timeout,
         verify=verify,
         follow_redirects=follow_redirects,
         http2=http2,
         limits=limits,
-        headers={
-            "User-Agent": ua,
-            "Accept": "*/*",
-            "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.5",
-        },
+        headers=request_headers,
+        event_hooks=hooks,
         proxy=proxy,
+        transport=transport,
     )
 
 

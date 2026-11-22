@@ -37,7 +37,7 @@ class Authorization:
 WARNING = """[bold red]ЮРИДИЧЕСКОЕ И ЭТИЧЕСКОЕ ПРЕДУПРЕЖДЕНИЕ[/bold red]
 
 MortyScan умеет проводить [bold]активное тестирование[/bold]
-(подбор путей, инъекции, сканирование портов) и
+(подбор путей, проверки конфигурации, инъекции, Nuclei и сканирование портов) и
 [bold red]нагрузочный (DoS-подобный) тест[/bold red] против указанной цели.
 
 Запуск этих функций против систем, которыми вы [bold]НЕ владеете[/bold]
@@ -64,7 +64,7 @@ def interactive_gate(target: str, want_intrusive: bool = True,
                      want_stress: bool = False, want_arp: bool = False,
                      assume_yes: bool = False) -> Authorization:
     auth = Authorization(target=target)
-    console.print(Panel(WARNING, border_style="red", title="MortyScan v18 «Инквизитор»"))
+    console.print(Panel(WARNING, border_style="red", title="MortyScan v20 «Deep Attack Platform»"))
 
     if assume_yes:
         auth.owner_or_authorized = True

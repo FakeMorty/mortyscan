@@ -18,7 +18,9 @@ CANDIDATES = [
 ]
 
 INTROSPECTION = {
-    "query": "query IntrospectionQuery { __schema { types { name } queryType { name } } }"
+    "query": "query IntrospectionQuery { __schema { types { name } "
+             "queryType { name fields { name args { name type { name kind ofType { name kind } } } } } "
+             "mutationType { name fields { name args { name type { name kind ofType { name kind } } } } } } }"
 }
 
 
@@ -61,6 +63,8 @@ async def run(ctx: ScanContext, client: httpx.AsyncClient) -> None:
                             "Для Express-GraphQL — параметр `disableIntrospection`.",
                 raw={"types_sample": types[:30]},
             ))
+    ctx.config["graphql_endpoints"] = sorted({item[0] for item in found})
+    ctx.endpoints.update(ctx.config["graphql_endpoints"])
     if not found:
         ctx.add(Finding(module=NAME, title="GraphQL-эндпоинт не обнаружен",
                         severity=Severity.INFO))
